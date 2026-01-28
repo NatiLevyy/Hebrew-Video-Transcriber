@@ -151,13 +151,20 @@ class FullPipelineWorker(QThread):
                 self.log_update.emit("=" * 50)
                 self.stage_update.emit("Loading model...", 40)
 
-                # Find video files
-                video_files = [
+                # Find all notebook subfolders
+                nb_folders = [
                     f for f in self.output_folder.iterdir()
-                    if f.is_file() and f.suffix.lower() in VIDEO_FORMATS
+                    if f.is_dir() and f.name not in ('Subtitle_HEBREW', 'Embedded_Videos')
                 ]
 
-                if not video_files:
+                # Collect all video files across notebook folders
+                all_videos = []
+                for nb_folder in nb_folders:
+                    for vf in nb_folder.iterdir():
+                        if vf.is_file() and vf.suffix.lower() in VIDEO_FORMATS:
+                            all_videos.append((nb_folder, vf))
+
+                if not all_videos:
                     self.log_update.emit("No video files to transcribe")
                 else:
                     transcriber = HebrewTranscriber()
@@ -167,22 +174,23 @@ class FullPipelineWorker(QThread):
                     transcriber.load_model()
                     self.log_update.emit(f"Model loaded on {transcriber.device.upper()}")
 
-                    srt_folder = self.output_folder / "Subtitle_HEBREW"
-                    srt_folder.mkdir(exist_ok=True)
-
-                    total = len(video_files)
-                    for i, video_path in enumerate(video_files):
+                    total = len(all_videos)
+                    for i, (nb_folder, video_path) in enumerate(all_videos):
                         if self._cancelled:
                             break
 
                         progress = 40 + int((i / total) * 30)
                         self.stage_update.emit(f"Transcribing {i+1}/{total}...", progress)
-                        self.log_update.emit(f"  [{i+1}/{total}] {video_path.name}")
+                        self.log_update.emit(f"  [{i+1}/{total}] {nb_folder.name}/{video_path.name}")
 
                         try:
                             audio_path = extractor.extract(str(video_path))
                             segments = transcriber.transcribe(audio_path)
                             Path(audio_path).unlink(missing_ok=True)
+
+                            # Save SRT inside the notebook folder
+                            srt_folder = nb_folder / "Subtitle_HEBREW"
+                            srt_folder.mkdir(exist_ok=True)
 
                             srt_path = srt_folder / f"{video_path.stem}.srt"
                             SRTExporter().export(segments, str(srt_path), video_path.stem)
@@ -203,23 +211,32 @@ class FullPipelineWorker(QThread):
                 self.log_update.emit("=" * 50)
                 self.stage_update.emit("Embedding subtitles...", 75)
 
-                srt_folder = self.output_folder / "Subtitle_HEBREW"
-                embed_folder = self.output_folder / "Embedded_Videos"
+                # Process each notebook folder separately
+                nb_folders = [
+                    f for f in self.output_folder.iterdir()
+                    if f.is_dir() and f.name not in ('Subtitle_HEBREW', 'Embedded_Videos')
+                ]
 
-                if srt_folder.exists():
-                    embed_result = embed_subtitles(
-                        video_folder=self.output_folder,
-                        srt_folder=srt_folder,
-                        output_folder=embed_folder,
-                        log=self.log_update.emit,
-                        skip_existing=True,
-                        fix_rtl=True
-                    )
+                for nb_folder in nb_folders:
+                    srt_folder = nb_folder / "Subtitle_HEBREW"
+                    embed_folder = nb_folder / "Embedded_Videos"
 
-                    results['embedded'] = len(embed_result.get('embedded', []))
-                    results['rtl_fixed'] = embed_result.get('rtl_fixed', 0)
-                else:
-                    self.log_update.emit("No SRT folder found, skipping embed")
+                    if srt_folder.exists():
+                        self.log_update.emit(f"\n--- {nb_folder.name} ---")
+                        embed_result = embed_subtitles(
+                            video_folder=nb_folder,
+                            srt_folder=srt_folder,
+                            output_folder=embed_folder,
+                            log=self.log_update.emit,
+                            skip_existing=True,
+                            fix_rtl=True
+                        )
+
+                        results['embedded'] += len(embed_result.get('embedded', []))
+                        results['rtl_fixed'] += embed_result.get('rtl_fixed', 0)
+
+                if not nb_folders:
+                    self.log_update.emit("No notebook folders found, skipping embed")
 
             # ===== COMPLETE =====
             self.stage_update.emit("Complete!", 100)

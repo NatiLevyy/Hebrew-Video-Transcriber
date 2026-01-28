@@ -540,7 +540,8 @@ class NotebookLMDownloader:
         download_video: bool = True,
         on_progress: Callable[[DownloadProgress], None] = None
     ) -> List[Path]:
-        """Download artifacts by clicking through NotebookLM UI."""
+        """Download artifacts by clicking through NotebookLM UI.
+        Each notebook gets its own subfolder under output_dir."""
         downloaded = []
         self._cancelled = False
 
@@ -570,6 +571,11 @@ class NotebookLMDownloader:
                 for nb in notebooks:
                     if self._cancelled:
                         break
+
+                    # Create a subfolder for this notebook
+                    clean_title = self._sanitize_filename(nb.title)
+                    nb_folder = output_dir / clean_title
+                    nb_folder.mkdir(parents=True, exist_ok=True)
 
                     # Navigate to notebook
                     if on_progress:
@@ -624,23 +630,22 @@ class NotebookLMDownloader:
                             download = download_info.value
                             suggested_filename = download.suggested_filename or f"video_{icon_idx + 1}.mp4"
 
-                            # Save to output directory with notebook name prefix
-                            clean_title = self._sanitize_filename(nb.title)
-                            output_path = output_dir / f"{clean_title} - {suggested_filename}"
+                            # Save to notebook subfolder
+                            output_path = nb_folder / suggested_filename
 
                             # Handle duplicate filenames
                             counter = 1
                             stem = output_path.stem
                             suffix = output_path.suffix or '.mp4'
                             while output_path.exists():
-                                output_path = output_dir / f"{stem}_{counter}{suffix}"
+                                output_path = nb_folder / f"{stem}_{counter}{suffix}"
                                 counter += 1
 
                             download.save_as(str(output_path))
                             downloaded.append(output_path)
 
                             if on_progress:
-                                on_progress(DownloadProgress(current_item, total_items, output_path.name, "completed"))
+                                on_progress(DownloadProgress(current_item, total_items, f"{clean_title}/{output_path.name}", "completed"))
 
                             time.sleep(1)
 
