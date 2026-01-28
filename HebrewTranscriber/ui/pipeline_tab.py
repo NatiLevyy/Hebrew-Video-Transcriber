@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QProgressBar, QTextEdit, QGroupBox,
     QFileDialog, QMessageBox, QCheckBox, QListWidget,
-    QListWidgetItem, QSplitter, QScrollArea
+    QListWidgetItem, QSplitter, QScrollArea, QLineEdit
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
 from pathlib import Path
@@ -342,6 +342,14 @@ class PipelineTab(QWidget):
         select_group.setStyleSheet("QGroupBox { font-weight: bold; font-size: 13px; }")
         select_layout = QVBoxLayout(select_group)
 
+        # Search box
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("Search notebooks...")
+        self.search_box.setClearButtonEnabled(True)
+        self.search_box.setStyleSheet("padding: 6px; font-size: 13px;")
+        self.search_box.textChanged.connect(self.on_search)
+        select_layout.addWidget(self.search_box)
+
         btn_row = QHBoxLayout()
         self.select_all_btn = QPushButton("Select All")
         self.select_all_btn.clicked.connect(self.select_all)
@@ -554,17 +562,29 @@ class PipelineTab(QWidget):
         self.notebook_list.itemChanged.connect(self.update_start_button)
         self.update_start_button()
 
+    def on_search(self, text: str):
+        """Filter notebook list by search text."""
+        search = text.strip().lower()
+        for i in range(self.notebook_list.count()):
+            item = self.notebook_list.item(i)
+            item.setHidden(search != '' and search not in item.text().lower())
+
     def select_all(self):
         for i in range(self.notebook_list.count()):
-            self.notebook_list.item(i).setCheckState(Qt.CheckState.Checked)
+            item = self.notebook_list.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.CheckState.Checked)
         self.update_start_button()
 
     def deselect_all(self):
         for i in range(self.notebook_list.count()):
-            self.notebook_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+            item = self.notebook_list.item(i)
+            if not item.isHidden():
+                item.setCheckState(Qt.CheckState.Unchecked)
         self.update_start_button()
 
     def on_refresh(self):
+        self.search_box.clear()
         self.list_notebooks()
 
     # ========== START PIPELINE ==========
