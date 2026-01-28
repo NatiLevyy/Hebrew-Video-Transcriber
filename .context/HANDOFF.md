@@ -1,5 +1,5 @@
 ## Goal
-Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output. Version 1.0.4 adds unified pipeline tab and RTL fixer integration.
+Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output. Version 1.0.5 adds fully automated one-click pipeline.
 
 ## Completed
 - [x] Created project directory structure
@@ -20,6 +20,9 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - [x] **v1.0.4** Created core/rtl_fixer.py - RTL punctuation fixer (from SubtitlePipeline)
 - [x] **v1.0.4** Integrated RTL fix into embedding process (automatic before embedding)
 - [x] **v1.0.4** Created ui/pipeline_tab.py - Unified pipeline: Transcribe → RTL Fix → Embed
+- [x] **v1.0.5** Fully automated one-click pipeline (Login → START runs everything)
+- [x] **v1.0.5** Created HebrewTranscriber.spec for PyInstaller EXE packaging
+- [x] **v1.0.5** Built HebrewTranscriber.exe (213MB) in dist/ folder
 
 ## Key Decisions
 - **Model**: ivrit-ai/whisper-v2-d4 (Hebrew fine-tuned)
@@ -29,7 +32,7 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - **v1.0.2 Chrome CDP**: Google blocks Playwright automation. Solution: launch real Chrome with CDP
 - **v1.0.3 Subtitle Embedding**: Using mkvmerge from MKVToolNix
 - **v1.0.4 RTL Fix**: Automatic RTL punctuation fixing before embedding (from SubtitlePipeline)
-- **v1.0.4 Unified Pipeline**: Single tab for complete workflow (Transcribe → RTL → Embed)
+- **v1.0.5 Unified Pipeline**: 2-click workflow (Login + START) runs: Scan → Download → Transcribe → RTL → Embed
 
 ## Known Issues
 - Warning about pkg_resources deprecation in ctranslate2 (harmless)
@@ -42,20 +45,29 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - `HebrewTranscriber/core/exporter.py` - MD/PDF/SRT export with RTL
 - `HebrewTranscriber/core/notebooklm_downloader.py` - NotebookLM batch downloader
 - `HebrewTranscriber/core/subtitle_embedder.py` - MKVToolNix subtitle embedding
-- `HebrewTranscriber/core/rtl_fixer.py` - **NEW v1.0.4** RTL punctuation fixer
+- `HebrewTranscriber/core/rtl_fixer.py` - RTL punctuation fixer
 - `HebrewTranscriber/ui/main_window.py` - PyQt6 GUI with tabs
-- `HebrewTranscriber/ui/pipeline_tab.py` - **NEW v1.0.4** Unified pipeline tab
+- `HebrewTranscriber/ui/pipeline_tab.py` - Fully automated pipeline tab
 - `HebrewTranscriber/ui/notebooklm_tab.py` - NotebookLM downloader tab
 - `HebrewTranscriber/ui/embedding_tab.py` - Subtitle embedding tab
 - `HebrewTranscriber/ui/styles.qss` - Application styling
+- `HebrewTranscriber.spec` - PyInstaller build configuration
 
 ## Version History
 - **v1.0.0** - Initial release with transcription functionality
 - **v1.0.2** - Added NotebookLM batch downloader feature
 - **v1.0.3** - Added subtitle embedding feature (SubtitlePipeline integration)
 - **v1.0.4** - Added RTL fixer + Unified pipeline tab (complete workflow)
+- **v1.0.5** - Fully automated one-click pipeline + EXE packaging
 
 ## External Dependencies
 - **ffmpeg** - Audio extraction (required for transcription)
 - **MKVToolNix** - Subtitle embedding (required for embed feature)
   - Download: https://mkvtoolnix.download/
+
+## Building EXE
+```bash
+cd g:\Projects\Hebrew-Video-Transcriber
+python -m PyInstaller HebrewTranscriber.spec --noconfirm
+```
+Output: `dist/HebrewTranscriber.exe` (213MB)
