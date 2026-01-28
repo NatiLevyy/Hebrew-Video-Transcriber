@@ -320,8 +320,8 @@ class MainWindow(QMainWindow):
         self.config = Config()
 
         self.setup_ui()
-        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.0.3")
-        self.setMinimumSize(1050, 750)
+        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.0.4")
+        self.setMinimumSize(1100, 800)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
     def setup_ui(self):
@@ -333,6 +333,11 @@ class MainWindow(QMainWindow):
         # Tab widget
         self.tab_widget = QTabWidget()
         self.tab_widget.setLayoutDirection(Qt.LayoutDirection.LeftToRight)  # Tabs LTR
+
+        # Pipeline tab (unified workflow) - FIRST TAB
+        from ui.pipeline_tab import PipelineTab
+        self.pipeline_tab = PipelineTab()
+        self.tab_widget.addTab(self.pipeline_tab, "⚡ Pipeline / צינור מלא")
 
         # Transcription tab
         self.transcription_tab = TranscriptionTab(self.config)

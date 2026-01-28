@@ -3,6 +3,7 @@ Subtitle Embedder - Embed Hebrew subtitles into video files.
 
 Uses mkvmerge (from MKVToolNix) to add Hebrew subtitle track to videos.
 Supports MP4/MKV input, outputs MKV with embedded Hebrew subtitles.
+Includes automatic RTL fixing for Hebrew subtitles.
 """
 
 import subprocess
@@ -10,7 +11,8 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict, List, Callable
 from dataclasses import dataclass
-import re
+
+from core.rtl_fixer import fix_rtl_folder, fix_rtl_file
 
 
 # Supported video formats
@@ -182,7 +184,8 @@ def embed_subtitles(
     output_folder: Path,
     log: Optional[Callable[[str], None]] = None,
     progress: Optional[Callable[[int, int], None]] = None,
-    skip_existing: bool = True
+    skip_existing: bool = True,
+    fix_rtl: bool = True
 ) -> Dict:
     """
     Embed Hebrew subtitles into all video files.
@@ -194,9 +197,10 @@ def embed_subtitles(
         log: Optional logging callback
         progress: Optional progress callback (current, total)
         skip_existing: Skip embedding if output MKV already exists
+        fix_rtl: Fix RTL punctuation before embedding (default: True)
 
     Returns:
-        Dict with 'embedded', 'failed', 'skipped', 'no_subtitle', 'output_folder'
+        Dict with 'embedded', 'failed', 'skipped', 'no_subtitle', 'output_folder', 'rtl_fixed'
     """
     if log is None:
         log = lambda x: None
@@ -210,10 +214,19 @@ def embed_subtitles(
             'failed': [("System", "MKVToolNix not installed")],
             'skipped': [],
             'no_subtitle': [],
-            'output_folder': output_folder
+            'output_folder': output_folder,
+            'rtl_fixed': 0
         }
 
-    log("=== Subtitle Embedding ===")
+    # Step 1: Fix RTL in SRT files before embedding
+    rtl_fixed_count = 0
+    if fix_rtl and srt_folder.exists():
+        log("=== Step 1: RTL Fix ===")
+        rtl_result = fix_rtl_folder(srt_folder, log=log)
+        rtl_fixed_count = rtl_result.get('total_lines_fixed', 0)
+        log("")
+
+    log("=== Step 2: Subtitle Embedding ===")
 
     # Find video files
     video_files = sorted([
@@ -297,11 +310,14 @@ def embed_subtitles(
 
     log(f"\n=== Complete ===")
     log(f"Embedded: {len(embedded)}, Skipped: {len(skipped)}, Failed: {len(failed)}, No SRT: {len(no_subtitle)}")
+    if rtl_fixed_count > 0:
+        log(f"RTL lines fixed: {rtl_fixed_count}")
 
     return {
         'embedded': embedded,
         'failed': failed,
         'skipped': skipped,
         'no_subtitle': no_subtitle,
-        'output_folder': output_folder
+        'output_folder': output_folder,
+        'rtl_fixed': rtl_fixed_count
     }
