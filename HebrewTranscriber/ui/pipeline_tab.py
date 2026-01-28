@@ -1,17 +1,21 @@
 """
-Unified Pipeline Tab - Complete workflow: Download → Transcribe → Embed
+Complete Pipeline Tab - Full workflow from NotebookLM to embedded videos.
 
-This tab provides a unified interface for the complete video processing pipeline:
-1. Download videos from NotebookLM
-2. Transcribe to Hebrew subtitles (SRT)
-3. Fix RTL and embed subtitles into videos
+Steps:
+1. Login to NotebookLM (Chrome CDP)
+2. Scan & Select notebooks
+3. Download videos
+4. Transcribe to Hebrew SRT
+5. Fix RTL punctuation
+6. Embed subtitles into videos
 """
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QPushButton, QProgressBar, QTextEdit, QGroupBox,
     QFileDialog, QMessageBox, QCheckBox, QListWidget,
-    QListWidgetItem, QSplitter, QFrame
+    QListWidgetItem, QSplitter, QFrame, QScrollArea,
+    QComboBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings
 from pathlib import Path
@@ -21,223 +25,325 @@ from core.transcriber import HebrewTranscriber
 from core.audio_extractor import AudioExtractor
 from core.exporter import SRTExporter
 from core.subtitle_embedder import embed_subtitles, is_mkvmerge_available, VIDEO_FORMATS
+from core.notebooklm_downloader import (
+    NotebookLMDownloader, launch_chrome, is_chrome_running,
+    connect_to_chrome, safe_disconnect, NotebookInfo, DownloadProgress
+)
 
 
-class PipelineWorker(QThread):
-    """Worker thread for the complete pipeline."""
+# ========== WORKERS ==========
+
+class AuthWorker(QThread):
+    """Worker for NotebookLM authentication."""
+    status_update = pyqtSignal(str)
+    auth_complete = pyqtSignal(bool, object)
+
+    def run(self):
+        downloader = NotebookLMDownloader()
+        success = downloader.authenticate(self.status_update.emit)
+        self.auth_complete.emit(success, downloader if success else None)
+
+
+class ListNotebooksWorker(QThread):
+    """Worker for listing notebooks."""
+    status_update = pyqtSignal(str)
+    list_complete = pyqtSignal(list)
+
+    def __init__(self, downloader):
+        super().__init__()
+        self.downloader = downloader
+
+    def run(self):
+        notebooks = self.downloader.list_notebooks(self.status_update.emit)
+        self.list_complete.emit(notebooks)
+
+
+class ScanMediaWorker(QThread):
+    """Worker for scanning notebooks for media."""
+    status_update = pyqtSignal(str)
+    scan_complete = pyqtSignal(list)
+
+    def __init__(self, downloader, notebooks):
+        super().__init__()
+        self.downloader = downloader
+        self.notebooks = notebooks
+
+    def run(self):
+        notebooks_with_media = self.downloader.scan_for_media(
+            self.notebooks, self.status_update.emit
+        )
+        self.scan_complete.emit(notebooks_with_media)
+
+
+class DownloadWorker(QThread):
+    """Worker for downloading media."""
+    progress_update = pyqtSignal(object)
+    download_complete = pyqtSignal(list)
+
+    def __init__(self, downloader, notebooks, output_dir):
+        super().__init__()
+        self.downloader = downloader
+        self.notebooks = notebooks
+        self.output_dir = output_dir
+
+    def run(self):
+        files = self.downloader.download_artifacts(
+            self.notebooks,
+            self.output_dir,
+            download_audio=True,
+            download_video=True,
+            on_progress=self.progress_update.emit
+        )
+        self.download_complete.emit(files)
+
+
+class TranscribeWorker(QThread):
+    """Worker for transcription."""
     log_update = pyqtSignal(str)
-    progress_update = pyqtSignal(int, int, str)  # current, total, stage
-    stage_complete = pyqtSignal(str, dict)  # stage_name, result
-    pipeline_complete = pyqtSignal(dict)
+    progress_update = pyqtSignal(int, int)
+    transcribe_complete = pyqtSignal(dict)
 
-    def __init__(self, video_files, output_folder, do_transcribe, do_embed):
+    def __init__(self, video_files, srt_folder):
         super().__init__()
         self.video_files = video_files
-        self.output_folder = Path(output_folder)
-        self.do_transcribe = do_transcribe
-        self.do_embed = do_embed
+        self.srt_folder = srt_folder
         self._cancelled = False
 
     def cancel(self):
         self._cancelled = True
 
     def run(self):
-        results = {
-            'transcribed': [],
-            'embedded': [],
-            'failed': [],
-            'srt_folder': None,
-            'output_folder': None
-        }
+        results = {'transcribed': [], 'failed': []}
 
-        total_files = len(self.video_files)
-        if total_files == 0:
-            self.log_update.emit("No video files to process")
-            self.pipeline_complete.emit(results)
+        if not self.video_files:
+            self.transcribe_complete.emit(results)
             return
 
-        # Create output folders
-        self.output_folder.mkdir(parents=True, exist_ok=True)
-        srt_folder = self.output_folder / "Subtitle_HEBREW"
-        srt_folder.mkdir(exist_ok=True)
-        embedded_folder = self.output_folder / "Embedded_Videos"
+        transcriber = HebrewTranscriber()
+        extractor = AudioExtractor()
 
-        results['srt_folder'] = srt_folder
-        results['output_folder'] = embedded_folder
+        self.log_update.emit("Loading transcription model...")
+        try:
+            transcriber.load_model()
+            self.log_update.emit(f"Model loaded on {transcriber.device.upper()}")
+        except Exception as e:
+            self.log_update.emit(f"ERROR: {e}")
+            self.transcribe_complete.emit(results)
+            return
 
-        # Stage 1: Transcription
-        if self.do_transcribe:
-            self.log_update.emit("\n" + "=" * 50)
-            self.log_update.emit("STAGE 1: TRANSCRIPTION")
-            self.log_update.emit("=" * 50)
+        self.srt_folder.mkdir(parents=True, exist_ok=True)
+        total = len(self.video_files)
 
-            transcriber = HebrewTranscriber()
-            extractor = AudioExtractor()
+        for i, video_path in enumerate(self.video_files):
+            if self._cancelled:
+                break
 
-            self.log_update.emit("Loading transcription model...")
+            video_path = Path(video_path)
+            self.progress_update.emit(i + 1, total)
+            self.log_update.emit(f"[{i+1}/{total}] {video_path.name}")
+
             try:
-                transcriber.load_model()
-                self.log_update.emit(f"Model loaded on {transcriber.device.upper()}")
+                # Extract audio
+                audio_path = extractor.extract(str(video_path))
+
+                # Transcribe
+                segments = transcriber.transcribe(audio_path)
+
+                # Cleanup
+                Path(audio_path).unlink(missing_ok=True)
+
+                # Save SRT
+                srt_path = self.srt_folder / f"{video_path.stem}.srt"
+                SRTExporter().export(segments, str(srt_path), video_path.stem)
+
+                results['transcribed'].append(video_path.name)
+                self.log_update.emit(f"  ✓ {srt_path.name}")
+
             except Exception as e:
-                self.log_update.emit(f"ERROR loading model: {e}")
-                self.pipeline_complete.emit(results)
-                return
+                results['failed'].append((video_path.name, str(e)))
+                self.log_update.emit(f"  ✗ Error: {e}")
 
-            for i, video_path in enumerate(self.video_files):
-                if self._cancelled:
-                    self.log_update.emit("Cancelled by user")
-                    break
+        self.transcribe_complete.emit(results)
 
-                video_path = Path(video_path)
-                filename = video_path.name
-                self.progress_update.emit(i + 1, total_files, "Transcribing")
-                self.log_update.emit(f"\n[{i+1}/{total_files}] {filename}")
 
-                try:
-                    # Extract audio
-                    self.log_update.emit(f"  Extracting audio...")
-                    audio_path = extractor.extract(str(video_path))
+class EmbedWorker(QThread):
+    """Worker for RTL fix + embedding."""
+    log_update = pyqtSignal(str)
+    progress_update = pyqtSignal(int, int)
+    embed_complete = pyqtSignal(dict)
 
-                    # Transcribe
-                    self.log_update.emit(f"  Transcribing...")
-                    segments = transcriber.transcribe(audio_path)
+    def __init__(self, video_folder, srt_folder, output_folder):
+        super().__init__()
+        self.video_folder = video_folder
+        self.srt_folder = srt_folder
+        self.output_folder = output_folder
 
-                    # Cleanup temp audio
-                    Path(audio_path).unlink(missing_ok=True)
+    def run(self):
+        result = embed_subtitles(
+            video_folder=self.video_folder,
+            srt_folder=self.srt_folder,
+            output_folder=self.output_folder,
+            log=self.log_update.emit,
+            progress=self.progress_update.emit,
+            skip_existing=True,
+            fix_rtl=True
+        )
+        self.embed_complete.emit(result)
 
-                    # Save SRT
-                    srt_path = srt_folder / f"{video_path.stem}.srt"
-                    SRTExporter().export(segments, str(srt_path), video_path.stem)
 
-                    results['transcribed'].append(video_path.name)
-                    self.log_update.emit(f"  ✓ Saved: {srt_path.name}")
-
-                except Exception as e:
-                    results['failed'].append((filename, f"Transcription: {str(e)}"))
-                    self.log_update.emit(f"  ✗ Error: {e}")
-
-            self.stage_complete.emit("transcription", {
-                'transcribed': len(results['transcribed']),
-                'failed': len([f for f in results['failed'] if 'Transcription' in f[1]])
-            })
-
-        # Stage 2: Embedding (with RTL fix)
-        if self.do_embed and not self._cancelled:
-            self.log_update.emit("\n" + "=" * 50)
-            self.log_update.emit("STAGE 2: RTL FIX + EMBEDDING")
-            self.log_update.emit("=" * 50)
-
-            if not is_mkvmerge_available():
-                self.log_update.emit("ERROR: MKVToolNix not installed!")
-                self.log_update.emit("Please install from: https://mkvtoolnix.download/")
-            else:
-                # Get video folder (parent of first video, or output folder)
-                video_folder = self.video_files[0].parent if self.video_files else self.output_folder
-
-                embed_result = embed_subtitles(
-                    video_folder=video_folder,
-                    srt_folder=srt_folder,
-                    output_folder=embedded_folder,
-                    log=self.log_update.emit,
-                    progress=lambda c, t: self.progress_update.emit(c, t, "Embedding"),
-                    skip_existing=True,
-                    fix_rtl=True
-                )
-
-                results['embedded'] = embed_result.get('embedded', [])
-                for fail in embed_result.get('failed', []):
-                    results['failed'].append(fail)
-
-                self.stage_complete.emit("embedding", {
-                    'embedded': len(results['embedded']),
-                    'rtl_fixed': embed_result.get('rtl_fixed', 0)
-                })
-
-        self.pipeline_complete.emit(results)
-
+# ========== MAIN TAB ==========
 
 class PipelineTab(QWidget):
-    """Unified pipeline tab for complete workflow."""
+    """Complete pipeline tab with all steps."""
 
     def __init__(self):
         super().__init__()
         self.settings = QSettings('HebrewTranscriber', 'Pipeline')
-        self.video_files = []
-        self.worker = None
+
+        # State
+        self.downloader = None
+        self.notebooks = []
+        self.notebooks_with_media = []
+        self.downloaded_files = []
+        self.output_folder = None
+
+        # Workers
+        self.auth_worker = None
+        self.list_worker = None
+        self.scan_worker = None
+        self.download_worker = None
+        self.transcribe_worker = None
+        self.embed_worker = None
+
         self.init_ui()
         self.load_settings()
 
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # === LEFT SIDE - Controls ===
+        # === LEFT: Steps Panel (scrollable) ===
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(500)
+        left_scroll.setMaximumWidth(600)
+
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(10)
+        left_layout.setSpacing(8)
 
         # Title
-        title = QLabel("Complete Pipeline")
-        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #4CAF50;")
+        title = QLabel("⚡ Complete Pipeline")
+        title.setStyleSheet("font-size: 20px; font-weight: bold; color: #4CAF50;")
         left_layout.addWidget(title)
 
-        subtitle = QLabel("Download → Transcribe → Embed (All in One)")
-        subtitle.setStyleSheet("color: #666; margin-bottom: 10px;")
-        left_layout.addWidget(subtitle)
+        # ===== STEP 1: NotebookLM Login =====
+        step1_group = QGroupBox("Step 1: NotebookLM Login")
+        step1_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        step1_layout = QVBoxLayout(step1_group)
 
-        # Video Files Group
-        files_group = QGroupBox("1. Video Files")
-        files_layout = QVBoxLayout(files_group)
+        step1_info = QLabel("Launch Chrome and login to your Google account")
+        step1_info.setStyleSheet("color: #666; font-size: 11px;")
+        step1_layout.addWidget(step1_info)
 
-        btn_layout = QHBoxLayout()
-        self.add_files_btn = QPushButton("Add Videos")
-        self.add_files_btn.clicked.connect(self.add_video_files)
-        self.add_folder_btn = QPushButton("Add Folder")
-        self.add_folder_btn.clicked.connect(self.add_video_folder)
-        self.clear_btn = QPushButton("Clear")
-        self.clear_btn.clicked.connect(self.clear_files)
-        btn_layout.addWidget(self.add_files_btn)
-        btn_layout.addWidget(self.add_folder_btn)
-        btn_layout.addWidget(self.clear_btn)
-        files_layout.addLayout(btn_layout)
+        self.login_btn = QPushButton("🌐 Launch Chrome & Login")
+        self.login_btn.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.login_btn.clicked.connect(self.on_login)
+        step1_layout.addWidget(self.login_btn)
 
-        self.file_list = QListWidget()
-        self.file_list.setMaximumHeight(150)
-        files_layout.addWidget(self.file_list)
+        self.login_status = QLabel("")
+        step1_layout.addWidget(self.login_status)
 
-        self.file_count_label = QLabel("0 files selected")
-        files_layout.addWidget(self.file_count_label)
+        left_layout.addWidget(step1_group)
 
-        left_layout.addWidget(files_group)
+        # ===== STEP 2: Select Notebooks =====
+        step2_group = QGroupBox("Step 2: Select Notebooks")
+        step2_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        step2_layout = QVBoxLayout(step2_group)
 
-        # Output Group
-        output_group = QGroupBox("2. Output Folder")
-        output_layout = QHBoxLayout(output_group)
+        btn_row = QHBoxLayout()
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(self.select_all)
+        self.deselect_btn = QPushButton("Deselect")
+        self.deselect_btn.clicked.connect(self.deselect_all)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self.on_refresh)
+        self.refresh_btn.setEnabled(False)
+        btn_row.addWidget(self.select_all_btn)
+        btn_row.addWidget(self.deselect_btn)
+        btn_row.addWidget(self.refresh_btn)
+        step2_layout.addLayout(btn_row)
 
-        self.output_path_label = QLabel("Not selected")
-        self.output_path_label.setObjectName("pathLabel")
-        output_layout.addWidget(self.output_path_label, 1)
+        self.notebook_list = QListWidget()
+        self.notebook_list.setMinimumHeight(150)
+        self.notebook_list.setMaximumHeight(200)
+        step2_layout.addWidget(self.notebook_list)
 
-        self.output_browse_btn = QPushButton("...")
-        self.output_browse_btn.setMaximumWidth(30)
-        self.output_browse_btn.clicked.connect(self.browse_output)
-        output_layout.addWidget(self.output_browse_btn)
+        self.scan_btn = QPushButton("🔍 Scan Selected for Media")
+        self.scan_btn.setStyleSheet("padding: 8px; background-color: #2196F3; color: white;")
+        self.scan_btn.clicked.connect(self.on_scan)
+        self.scan_btn.setEnabled(False)
+        step2_layout.addWidget(self.scan_btn)
 
-        left_layout.addWidget(output_group)
+        left_layout.addWidget(step2_group)
 
-        # Options Group
-        options_group = QGroupBox("3. Pipeline Steps")
-        options_layout = QVBoxLayout(options_group)
+        # ===== STEP 3: Download =====
+        step3_group = QGroupBox("Step 3: Download Videos")
+        step3_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        step3_layout = QVBoxLayout(step3_group)
 
-        self.transcribe_cb = QCheckBox("Transcribe videos to Hebrew SRT")
-        self.transcribe_cb.setChecked(True)
-        options_layout.addWidget(self.transcribe_cb)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(QLabel("Output Folder:"))
+        self.output_label = QLabel("Not selected")
+        self.output_label.setStyleSheet("color: #666;")
+        folder_row.addWidget(self.output_label, 1)
+        self.browse_btn = QPushButton("...")
+        self.browse_btn.setMaximumWidth(30)
+        self.browse_btn.clicked.connect(self.browse_output)
+        folder_row.addWidget(self.browse_btn)
+        step3_layout.addLayout(folder_row)
 
-        self.embed_cb = QCheckBox("Fix RTL + Embed subtitles into videos")
-        self.embed_cb.setChecked(True)
-        options_layout.addWidget(self.embed_cb)
+        self.download_btn = QPushButton("⬇️ Download Media")
+        self.download_btn.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.download_btn.clicked.connect(self.on_download)
+        self.download_btn.setEnabled(False)
+        step3_layout.addWidget(self.download_btn)
+
+        self.download_progress = QProgressBar()
+        self.download_progress.setVisible(False)
+        step3_layout.addWidget(self.download_progress)
+
+        left_layout.addWidget(step3_group)
+
+        # ===== STEP 4: Transcribe =====
+        step4_group = QGroupBox("Step 4: Transcribe to Hebrew")
+        step4_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        step4_layout = QVBoxLayout(step4_group)
+
+        self.transcribe_info = QLabel("Transcribe downloaded videos using ivrit-ai/whisper")
+        self.transcribe_info.setStyleSheet("color: #666; font-size: 11px;")
+        step4_layout.addWidget(self.transcribe_info)
+
+        self.transcribe_btn = QPushButton("🎤 Transcribe Videos")
+        self.transcribe_btn.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.transcribe_btn.clicked.connect(self.on_transcribe)
+        self.transcribe_btn.setEnabled(False)
+        step4_layout.addWidget(self.transcribe_btn)
+
+        self.transcribe_progress = QProgressBar()
+        self.transcribe_progress.setVisible(False)
+        step4_layout.addWidget(self.transcribe_progress)
+
+        left_layout.addWidget(step4_group)
+
+        # ===== STEP 5: RTL Fix + Embed =====
+        step5_group = QGroupBox("Step 5: RTL Fix + Embed Subtitles")
+        step5_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        step5_layout = QVBoxLayout(step5_group)
 
         # MKVToolNix status
         self.mkvmerge_status = QLabel()
@@ -245,85 +351,81 @@ class PipelineTab(QWidget):
             self.mkvmerge_status.setText("✓ MKVToolNix found")
             self.mkvmerge_status.setStyleSheet("color: green; font-size: 11px;")
         else:
-            self.mkvmerge_status.setText("⚠ MKVToolNix not found (embedding disabled)")
+            self.mkvmerge_status.setText("⚠ MKVToolNix not found - Install from mkvtoolnix.download")
             self.mkvmerge_status.setStyleSheet("color: orange; font-size: 11px;")
-            self.embed_cb.setChecked(False)
-            self.embed_cb.setEnabled(False)
-        options_layout.addWidget(self.mkvmerge_status)
+        step5_layout.addWidget(self.mkvmerge_status)
 
-        left_layout.addWidget(options_group)
+        self.embed_btn = QPushButton("📀 Fix RTL & Embed Subtitles")
+        self.embed_btn.setStyleSheet("padding: 10px; font-size: 13px;")
+        self.embed_btn.clicked.connect(self.on_embed)
+        self.embed_btn.setEnabled(False)
+        step5_layout.addWidget(self.embed_btn)
 
-        # Progress
-        progress_group = QGroupBox("4. Progress")
-        progress_layout = QVBoxLayout(progress_group)
+        self.embed_progress = QProgressBar()
+        self.embed_progress.setVisible(False)
+        step5_layout.addWidget(self.embed_progress)
 
-        self.stage_label = QLabel("Ready")
-        self.stage_label.setStyleSheet("font-weight: bold;")
-        progress_layout.addWidget(self.stage_label)
+        left_layout.addWidget(step5_group)
 
-        self.progress_bar = QProgressBar()
-        progress_layout.addWidget(self.progress_bar)
-
-        left_layout.addWidget(progress_group)
-
-        # Action Buttons
-        btn_layout2 = QHBoxLayout()
-
-        self.start_btn = QPushButton("▶ Start Pipeline")
-        self.start_btn.setObjectName("startBtn")
-        self.start_btn.setStyleSheet("""
-            QPushButton#startBtn {
-                background-color: #4CAF50;
-                color: white;
+        # ===== RUN ALL Button =====
+        self.run_all_btn = QPushButton("▶️ RUN COMPLETE PIPELINE")
+        self.run_all_btn.setStyleSheet("""
+            QPushButton {
                 padding: 15px;
                 font-size: 16px;
                 font-weight: bold;
-                border-radius: 6px;
+                background-color: #4CAF50;
+                color: white;
+                border-radius: 8px;
             }
-            QPushButton#startBtn:hover {
-                background-color: #45a049;
-            }
-            QPushButton#startBtn:disabled {
-                background-color: #cccccc;
-            }
+            QPushButton:hover { background-color: #45a049; }
+            QPushButton:disabled { background-color: #cccccc; }
         """)
-        self.start_btn.clicked.connect(self.start_pipeline)
-        btn_layout2.addWidget(self.start_btn)
+        self.run_all_btn.clicked.connect(self.on_run_all)
+        self.run_all_btn.setEnabled(False)
+        left_layout.addWidget(self.run_all_btn)
 
+        # Cancel button
         self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.on_cancel)
         self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self.cancel_pipeline)
-        btn_layout2.addWidget(self.cancel_btn)
+        left_layout.addWidget(self.cancel_btn)
 
-        left_layout.addLayout(btn_layout2)
         left_layout.addStretch()
+        left_scroll.setWidget(left_widget)
 
-        # === RIGHT SIDE - Log ===
+        # === RIGHT: Log Panel ===
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
 
-        log_label = QLabel("Pipeline Log:")
-        right_layout.addWidget(log_label)
+        log_title = QLabel("Pipeline Log")
+        log_title.setStyleSheet("font-size: 14px; font-weight: bold;")
+        right_layout.addWidget(log_title)
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setStyleSheet("font-family: Consolas; font-size: 11px;")
         right_layout.addWidget(self.log_text)
 
-        # Add to splitter
-        splitter.addWidget(left_widget)
+        # Summary
+        self.summary_label = QLabel("")
+        self.summary_label.setStyleSheet("font-size: 12px; padding: 5px; background: #f0f0f0; border-radius: 4px;")
+        right_layout.addWidget(self.summary_label)
+
+        splitter.addWidget(left_scroll)
         splitter.addWidget(right_widget)
-        splitter.setSizes([450, 550])
+        splitter.setSizes([500, 500])
 
         main_layout.addWidget(splitter)
 
     def load_settings(self):
         self.output_folder = self.settings.value('output_folder', '')
         if self.output_folder:
-            self.output_path_label.setText(self.output_folder)
+            self.output_label.setText(self.output_folder)
 
     def save_settings(self):
-        self.settings.setValue('output_folder', self.output_folder)
+        if self.output_folder:
+            self.settings.setValue('output_folder', self.output_folder)
 
     def log(self, msg: str):
         self.log_text.append(msg)
@@ -331,144 +433,280 @@ class PipelineTab(QWidget):
             self.log_text.verticalScrollBar().maximum()
         )
 
-    def add_video_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Video Files",
-            "",
-            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm *.m4v *.wmv)"
-        )
-        for f in files:
-            if f not in [str(v) for v in self.video_files]:
-                self.video_files.append(Path(f))
-                self.file_list.addItem(Path(f).name)
-        self.update_file_count()
+    def update_summary(self, text: str):
+        self.summary_label.setText(text)
 
-    def add_video_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select Video Folder")
-        if folder:
-            folder_path = Path(folder)
-            for f in folder_path.iterdir():
-                if f.is_file() and f.suffix.lower() in VIDEO_FORMATS:
-                    if f not in self.video_files:
-                        self.video_files.append(f)
-                        self.file_list.addItem(f.name)
-            self.update_file_count()
+    # ========== STEP 1: Login ==========
+    def on_login(self):
+        self.login_btn.setEnabled(False)
+        self.login_status.setText("Starting Chrome...")
+        self.log_text.clear()
+        self.log("=== Step 1: NotebookLM Login ===")
 
-            # Auto-set output folder
-            if not self.output_folder:
-                self.output_folder = folder
-                self.output_path_label.setText(folder)
-                self.save_settings()
+        self.auth_worker = AuthWorker()
+        self.auth_worker.status_update.connect(self.log)
+        self.auth_worker.auth_complete.connect(self.on_auth_complete)
+        self.auth_worker.start()
 
-    def clear_files(self):
-        self.video_files = []
-        self.file_list.clear()
-        self.update_file_count()
+    def on_auth_complete(self, success: bool, downloader):
+        self.login_btn.setEnabled(True)
+        if success:
+            self.downloader = downloader
+            self.login_status.setText("✓ Connected!")
+            self.login_status.setStyleSheet("color: green; font-weight: bold;")
+            self.refresh_btn.setEnabled(True)
+            self.log("Login successful!")
+            self.list_notebooks()
+        else:
+            self.login_status.setText("✗ Failed")
+            self.login_status.setStyleSheet("color: red;")
 
-    def update_file_count(self):
-        count = len(self.video_files)
-        self.file_count_label.setText(f"{count} file{'s' if count != 1 else ''} selected")
+    # ========== STEP 2: List & Select Notebooks ==========
+    def list_notebooks(self):
+        if not self.downloader:
+            return
+        self.refresh_btn.setEnabled(False)
+        self.scan_btn.setEnabled(False)
+        self.notebook_list.clear()
 
+        self.list_worker = ListNotebooksWorker(self.downloader)
+        self.list_worker.status_update.connect(self.log)
+        self.list_worker.list_complete.connect(self.on_list_complete)
+        self.list_worker.start()
+
+    def on_list_complete(self, notebooks):
+        notebooks.sort(key=lambda nb: nb.title.lower())
+        self.notebooks = notebooks
+        self.notebook_list.clear()
+        self.refresh_btn.setEnabled(True)
+
+        for nb in notebooks:
+            item = QListWidgetItem(f"{nb.emoji} {nb.title}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
+            item.setData(Qt.ItemDataRole.UserRole, nb)
+            self.notebook_list.addItem(item)
+
+        self.scan_btn.setEnabled(len(notebooks) > 0)
+        self.log(f"Found {len(notebooks)} notebooks")
+        self.update_summary(f"📓 {len(notebooks)} notebooks found")
+
+    def select_all(self):
+        for i in range(self.notebook_list.count()):
+            self.notebook_list.item(i).setCheckState(Qt.CheckState.Checked)
+
+    def deselect_all(self):
+        for i in range(self.notebook_list.count()):
+            self.notebook_list.item(i).setCheckState(Qt.CheckState.Unchecked)
+
+    def on_refresh(self):
+        self.notebooks_with_media = []
+        self.download_btn.setEnabled(False)
+        self.list_notebooks()
+
+    def on_scan(self):
+        selected = []
+        for i in range(self.notebook_list.count()):
+            item = self.notebook_list.item(i)
+            if item.checkState() == Qt.CheckState.Checked:
+                selected.append(item.data(Qt.ItemDataRole.UserRole))
+
+        if not selected:
+            QMessageBox.warning(self, "Error", "Please select at least one notebook")
+            return
+
+        self.scan_btn.setEnabled(False)
+        self.log(f"\n=== Step 2: Scanning {len(selected)} notebooks ===")
+
+        self.scan_worker = ScanMediaWorker(self.downloader, selected)
+        self.scan_worker.status_update.connect(self.log)
+        self.scan_worker.scan_complete.connect(self.on_scan_complete)
+        self.scan_worker.start()
+
+    def on_scan_complete(self, notebooks_with_media):
+        self.notebooks_with_media = notebooks_with_media
+        self.scan_btn.setEnabled(True)
+
+        # Update list with media counts
+        for i in range(self.notebook_list.count()):
+            item = self.notebook_list.item(i)
+            nb = item.data(Qt.ItemDataRole.UserRole)
+            media_nb = next((n for n in notebooks_with_media if n.project_id == nb.project_id), None)
+            if media_nb:
+                a = len(media_nb.audio_artifacts)
+                v = len(media_nb.video_artifacts)
+                item.setText(f"{nb.emoji} {nb.title} [{a}a, {v}v]")
+                item.setData(Qt.ItemDataRole.UserRole, media_nb)
+
+        if notebooks_with_media:
+            self.download_btn.setEnabled(True)
+            total_a = sum(len(nb.audio_artifacts) for nb in notebooks_with_media)
+            total_v = sum(len(nb.video_artifacts) for nb in notebooks_with_media)
+            self.log(f"Ready: {len(notebooks_with_media)} notebooks, {total_a} audio, {total_v} video")
+            self.update_summary(f"🎬 {total_a + total_v} media files ready to download")
+        else:
+            self.log("No media found")
+
+    # ========== STEP 3: Download ==========
     def browse_output(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Output Folder")
         if folder:
             self.output_folder = folder
-            self.output_path_label.setText(folder)
+            self.output_label.setText(folder)
             self.save_settings()
 
-    def start_pipeline(self):
-        # Validation
-        if not self.video_files:
-            QMessageBox.warning(self, "Error", "Please add video files first")
+    def on_download(self):
+        if not self.notebooks_with_media:
+            QMessageBox.warning(self, "Error", "No media to download")
             return
-
         if not self.output_folder:
-            QMessageBox.warning(self, "Error", "Please select an output folder")
+            QMessageBox.warning(self, "Error", "Please select output folder")
             return
 
-        if not self.transcribe_cb.isChecked() and not self.embed_cb.isChecked():
-            QMessageBox.warning(self, "Error", "Please select at least one pipeline step")
-            return
-
-        # Clear log and start
-        self.log_text.clear()
-        self.log("=" * 50)
-        self.log("STARTING PIPELINE")
-        self.log("=" * 50)
-        self.log(f"Videos: {len(self.video_files)}")
-        self.log(f"Output: {self.output_folder}")
-        self.log(f"Transcribe: {'Yes' if self.transcribe_cb.isChecked() else 'No'}")
-        self.log(f"Embed: {'Yes' if self.embed_cb.isChecked() else 'No'}")
-
-        # Disable UI
-        self.start_btn.setEnabled(False)
+        self.download_btn.setEnabled(False)
+        self.download_progress.setVisible(True)
+        self.download_progress.setValue(0)
         self.cancel_btn.setEnabled(True)
-        self.add_files_btn.setEnabled(False)
-        self.add_folder_btn.setEnabled(False)
 
-        # Start worker
-        self.worker = PipelineWorker(
-            video_files=self.video_files.copy(),
-            output_folder=self.output_folder,
-            do_transcribe=self.transcribe_cb.isChecked(),
-            do_embed=self.embed_cb.isChecked()
+        output_dir = Path(self.output_folder)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        self.log(f"\n=== Step 3: Downloading to {self.output_folder} ===")
+
+        self.download_worker = DownloadWorker(
+            self.downloader, self.notebooks_with_media, output_dir
         )
-        self.worker.log_update.connect(self.log)
-        self.worker.progress_update.connect(self.on_progress)
-        self.worker.stage_complete.connect(self.on_stage_complete)
-        self.worker.pipeline_complete.connect(self.on_complete)
-        self.worker.start()
+        self.download_worker.progress_update.connect(self.on_download_progress)
+        self.download_worker.download_complete.connect(self.on_download_complete)
+        self.download_worker.start()
 
-    def cancel_pipeline(self):
-        if self.worker:
-            self.worker.cancel()
+    def on_download_progress(self, progress):
+        if progress.total > 0:
+            pct = int(progress.current / progress.total * 100)
+            self.download_progress.setValue(pct)
+        self.log(f"[{progress.status}] {progress.current}/{progress.total} {progress.current_file}")
+
+    def on_download_complete(self, files):
+        self.downloaded_files = files
+        self.download_btn.setEnabled(True)
+        self.download_progress.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+
+        self.log(f"Downloaded {len(files)} files")
+        self.update_summary(f"⬇️ Downloaded {len(files)} files")
+
+        if files:
+            self.transcribe_btn.setEnabled(True)
+
+    # ========== STEP 4: Transcribe ==========
+    def on_transcribe(self):
+        if not self.output_folder:
+            QMessageBox.warning(self, "Error", "No output folder set")
+            return
+
+        # Find video files
+        output_path = Path(self.output_folder)
+        video_files = [f for f in output_path.iterdir()
+                      if f.is_file() and f.suffix.lower() in VIDEO_FORMATS]
+
+        if not video_files:
+            QMessageBox.warning(self, "Error", "No video files found in output folder")
+            return
+
+        self.transcribe_btn.setEnabled(False)
+        self.transcribe_progress.setVisible(True)
+        self.transcribe_progress.setValue(0)
+        self.cancel_btn.setEnabled(True)
+
+        srt_folder = output_path / "Subtitle_HEBREW"
+
+        self.log(f"\n=== Step 4: Transcribing {len(video_files)} videos ===")
+
+        self.transcribe_worker = TranscribeWorker(video_files, srt_folder)
+        self.transcribe_worker.log_update.connect(self.log)
+        self.transcribe_worker.progress_update.connect(
+            lambda c, t: self.transcribe_progress.setValue(int(c/t*100) if t else 0)
+        )
+        self.transcribe_worker.transcribe_complete.connect(self.on_transcribe_complete)
+        self.transcribe_worker.start()
+
+    def on_transcribe_complete(self, results):
+        self.transcribe_btn.setEnabled(True)
+        self.transcribe_progress.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+
+        count = len(results.get('transcribed', []))
+        self.log(f"Transcribed {count} files")
+        self.update_summary(f"🎤 Transcribed {count} files")
+
+        if count > 0 and is_mkvmerge_available():
+            self.embed_btn.setEnabled(True)
+
+    # ========== STEP 5: RTL + Embed ==========
+    def on_embed(self):
+        if not self.output_folder:
+            return
+
+        output_path = Path(self.output_folder)
+        srt_folder = output_path / "Subtitle_HEBREW"
+        embed_folder = output_path / "Embedded_Videos"
+
+        if not srt_folder.exists():
+            QMessageBox.warning(self, "Error", "No SRT files found. Run transcription first.")
+            return
+
+        self.embed_btn.setEnabled(False)
+        self.embed_progress.setVisible(True)
+        self.embed_progress.setValue(0)
+        self.cancel_btn.setEnabled(True)
+
+        self.log(f"\n=== Step 5: RTL Fix + Embedding ===")
+
+        self.embed_worker = EmbedWorker(output_path, srt_folder, embed_folder)
+        self.embed_worker.log_update.connect(self.log)
+        self.embed_worker.progress_update.connect(
+            lambda c, t: self.embed_progress.setValue(int(c/t*100) if t else 0)
+        )
+        self.embed_worker.embed_complete.connect(self.on_embed_complete)
+        self.embed_worker.start()
+
+    def on_embed_complete(self, result):
+        self.embed_btn.setEnabled(True)
+        self.embed_progress.setVisible(False)
+        self.cancel_btn.setEnabled(False)
+
+        count = len(result.get('embedded', []))
+        rtl = result.get('rtl_fixed', 0)
+        self.log(f"\n✅ PIPELINE COMPLETE!")
+        self.log(f"Embedded: {count} videos")
+        self.log(f"RTL lines fixed: {rtl}")
+        self.update_summary(f"✅ Complete! {count} videos with embedded Hebrew subtitles")
+
+        # Open output folder
+        output = result.get('output_folder')
+        if output and Path(output).exists():
+            QMessageBox.information(self, "Complete", f"Pipeline complete!\n\nEmbedded {count} videos.")
+            os.startfile(str(output))
+
+    # ========== RUN ALL ==========
+    def on_run_all(self):
+        # This button runs the complete pipeline automatically
+        # For now, guide user through steps
+        QMessageBox.information(
+            self, "Run Pipeline",
+            "Please follow the steps in order:\n\n"
+            "1. Login to NotebookLM\n"
+            "2. Select notebooks and scan for media\n"
+            "3. Download videos\n"
+            "4. Transcribe\n"
+            "5. Embed subtitles\n\n"
+            "Each step will enable the next when ready."
+        )
+
+    def on_cancel(self):
+        if self.downloader:
+            self.downloader.cancel()
+        if self.transcribe_worker:
+            self.transcribe_worker.cancel()
         self.cancel_btn.setEnabled(False)
         self.log("Cancelling...")
-
-    def on_progress(self, current: int, total: int, stage: str):
-        self.stage_label.setText(f"{stage}: {current}/{total}")
-        if total > 0:
-            self.progress_bar.setValue(int((current / total) * 100))
-
-    def on_stage_complete(self, stage: str, result: dict):
-        self.log(f"\n✓ {stage.upper()} complete: {result}")
-
-    def on_complete(self, results: dict):
-        # Re-enable UI
-        self.start_btn.setEnabled(True)
-        self.cancel_btn.setEnabled(False)
-        self.add_files_btn.setEnabled(True)
-        self.add_folder_btn.setEnabled(True)
-        self.stage_label.setText("Complete!")
-        self.progress_bar.setValue(100)
-
-        # Summary
-        self.log("\n" + "=" * 50)
-        self.log("PIPELINE COMPLETE")
-        self.log("=" * 50)
-        self.log(f"Transcribed: {len(results.get('transcribed', []))}")
-        self.log(f"Embedded: {len(results.get('embedded', []))}")
-        self.log(f"Failed: {len(results.get('failed', []))}")
-
-        if results.get('failed'):
-            self.log("\nFailed files:")
-            for name, error in results['failed']:
-                self.log(f"  - {name}: {error}")
-
-        # Show completion message
-        transcribed = len(results.get('transcribed', []))
-        embedded = len(results.get('embedded', []))
-
-        if transcribed > 0 or embedded > 0:
-            msg = f"Pipeline complete!\n\nTranscribed: {transcribed}\nEmbedded: {embedded}"
-            QMessageBox.information(self, "Complete", msg)
-
-            # Open output folder
-            output = results.get('output_folder')
-            if output and Path(output).exists():
-                os.startfile(str(output))
-            elif self.output_folder:
-                os.startfile(str(self.output_folder))
-        else:
-            QMessageBox.warning(self, "Complete", "Pipeline finished but no files were processed.")
