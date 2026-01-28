@@ -223,6 +223,39 @@ class NotebookLMDownloader:
                 page.goto("https://notebooklm.google.com/", wait_until="networkidle", timeout=30000)
                 time.sleep(3)
 
+                # Scroll down to load ALL notebooks (lazy loading)
+                if on_status:
+                    on_status("Scrolling to load all notebooks...")
+
+                prev_count = 0
+                stable_rounds = 0
+                for scroll_attempt in range(30):
+                    # Scroll to bottom
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    # Also scroll any scrollable container
+                    page.evaluate("""() => {
+                        const containers = document.querySelectorAll('[class*="list"], [class*="grid"], [class*="container"], [class*="scroll"], main');
+                        containers.forEach(c => { c.scrollTop = c.scrollHeight; });
+                    }""")
+                    time.sleep(0.8)
+
+                    # Check how many notebook links we have now
+                    cur_count = page.evaluate("""() => {
+                        return document.querySelectorAll('a[href*="/notebook/"]').length;
+                    }""")
+
+                    if cur_count == prev_count and cur_count > 0:
+                        stable_rounds += 1
+                        if stable_rounds >= 3:
+                            break
+                    else:
+                        stable_rounds = 0
+                    prev_count = cur_count
+
+                # Scroll back to top
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.5)
+
                 # Get notebook cards with titles from homepage
                 if on_status:
                     on_status("Finding notebooks on homepage...")
@@ -257,6 +290,23 @@ class NotebookLMDownloader:
                         if (id && /^[a-f0-9-]{36}$/i.test(id)) {
                             const title = el.textContent.trim().substring(0, 100) || 'Untitled';
                             notebooks.push({id: id, title: title});
+                        }
+                    });
+
+                    // Method 3: Search ALL hrefs in the page for notebook UUIDs
+                    document.querySelectorAll('a[href]').forEach(a => {
+                        const href = a.getAttribute('href') || '';
+                        const match = href.match(/notebook\\/([a-f0-9-]{36})/i);
+                        if (match) {
+                            let title = '';
+                            const titleEl = a.querySelector('h1, h2, h3, [class*="title"], [class*="name"]');
+                            if (titleEl) {
+                                title = titleEl.textContent.trim();
+                            } else {
+                                // Get text but limit and clean it
+                                title = a.innerText?.split('\\n').filter(l => l.trim()).slice(0, 2).join(' - ').trim() || '';
+                            }
+                            notebooks.push({id: match[1], title: title.substring(0, 100) || 'Untitled'});
                         }
                     });
 

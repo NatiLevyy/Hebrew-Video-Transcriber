@@ -339,7 +339,17 @@ class PipelineTab(QWidget):
         select_layout.addLayout(btn_row)
 
         self.notebook_list = QListWidget()
-        self.notebook_list.setMinimumHeight(180)
+        self.notebook_list.setMinimumHeight(350)
+        self.notebook_list.setStyleSheet("""
+            QListWidget {
+                font-size: 13px;
+                padding: 4px;
+            }
+            QListWidget::item {
+                padding: 6px 4px;
+                border-bottom: 1px solid #eee;
+            }
+        """)
         select_layout.addWidget(self.notebook_list)
 
         self.notebook_count = QLabel("Login to see notebooks")
