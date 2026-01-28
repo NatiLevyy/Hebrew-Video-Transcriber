@@ -1,5 +1,5 @@
 ## Goal
-Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output in MD/PDF formats. Version 1.0.2 adds NotebookLM batch downloader feature.
+Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output in MD/PDF formats. Version 1.0.3 adds subtitle embedding feature (from SubtitlePipeline integration).
 
 ## Completed
 - [x] Created project directory structure
@@ -19,9 +19,13 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - [x] **v1.0.2** Refactored main_window.py to use tabs (Transcription + NotebookLM)
 - [x] **v1.0.2** Updated styles.qss with tab widget styles and new UI components
 - [x] **v1.0.2** Updated requirements.txt with playwright and requests
+- [x] **v1.0.2** Created GitHub repo and pushed: https://github.com/NatiLevyy/Hebrew-Video-Transcriber
+- [x] **v1.0.3** Created core/subtitle_embedder.py - MKVToolNix-based subtitle embedding (from SubtitlePipeline)
+- [x] **v1.0.3** Created ui/embedding_tab.py - Subtitle embedding UI tab
+- [x] **v1.0.3** Added Embed Subtitles tab to main window
 
 ## In Progress
-- [ ] User testing: Login → List notebooks → Select → Scan for media → Download
+- [ ] Testing v1.0.3 subtitle embedding feature
 
 ## Key Decisions
 - **Model**: ivrit-ai/whisper-v2-d4 (Hebrew fine-tuned)
@@ -31,28 +35,39 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - **v1.0.2 Chrome CDP**: Google blocks Playwright automation. Solution: launch real Chrome with `--remote-debugging-port=9222` and connect via CDP
 - **v1.0.2 Per-operation connections**: Playwright sync API isn't thread-safe. Each QThread creates own connection
 - **v1.0.2 UI Layout**: Horizontal splitter with controls on left, log on right
+- **v1.0.3 Subtitle Embedding**: Integrated from SubtitlePipeline project using mkvmerge (MKVToolNix)
+- **v1.0.3 Video Format**: Input supports MP4/MKV/AVI/MOV/WebM, output is always MKV with embedded subtitles
 
 ## Known Issues
 - Warning about pkg_resources deprecation in ctranslate2 (does not affect functionality)
 - Font download for PDF may fail if network unavailable (falls back to Helvetica)
 - Node url.parse() deprecation warning from Playwright (harmless)
+- **v1.0.3**: Requires MKVToolNix to be installed separately for embedding feature
 
 ## Next Steps
-1. Test NotebookLM login and notebook scanning
-2. Verify downloaded files can be transcribed by the Transcription tab
-3. If no media found, may need to adjust regex patterns or add more wait time
+1. Test subtitle embedding with downloaded videos
+2. Consider adding auto-embed option after transcription completes
+3. Add batch embedding progress indicator
 
 ## Important Files
 - `HebrewTranscriber/main.py` - Application entry point
 - `HebrewTranscriber/core/transcriber.py` - Whisper transcription engine
 - `HebrewTranscriber/core/audio_extractor.py` - ffmpeg audio extraction
 - `HebrewTranscriber/core/exporter.py` - MD/PDF export with RTL
-- `HebrewTranscriber/core/notebooklm_downloader.py` - **NEW** NotebookLM batch downloader
+- `HebrewTranscriber/core/notebooklm_downloader.py` - NotebookLM batch downloader
+- `HebrewTranscriber/core/subtitle_embedder.py` - **NEW v1.0.3** MKVToolNix subtitle embedding
 - `HebrewTranscriber/ui/main_window.py` - PyQt6 GUI with tabs
-- `HebrewTranscriber/ui/notebooklm_tab.py` - **NEW** NotebookLM downloader tab
+- `HebrewTranscriber/ui/notebooklm_tab.py` - NotebookLM downloader tab
+- `HebrewTranscriber/ui/embedding_tab.py` - **NEW v1.0.3** Subtitle embedding tab
 - `HebrewTranscriber/ui/styles.qss` - Application styling
 - `HebrewTranscriber/utils/config.py` - Settings persistence
 
 ## Version History
 - **v1.0.0** - Initial release with transcription functionality
 - **v1.0.2** - Added NotebookLM batch downloader feature with tab-based UI
+- **v1.0.3** - Added subtitle embedding feature (SubtitlePipeline integration)
+
+## External Dependencies
+- **ffmpeg** - Audio extraction (required for transcription)
+- **MKVToolNix** - Subtitle embedding (required for v1.0.3 embed feature)
+  - Download: https://mkvtoolnix.download/

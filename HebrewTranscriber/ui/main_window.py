@@ -320,7 +320,7 @@ class MainWindow(QMainWindow):
         self.config = Config()
 
         self.setup_ui()
-        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.0.2")
+        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.0.3")
         self.setMinimumSize(1050, 750)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
@@ -342,5 +342,10 @@ class MainWindow(QMainWindow):
         from ui.notebooklm_tab import NotebookLMTab
         self.notebooklm_tab = NotebookLMTab()
         self.tab_widget.addTab(self.notebooklm_tab, "NotebookLM")
+
+        # Embedding tab
+        from ui.embedding_tab import EmbeddingTab
+        self.embedding_tab = EmbeddingTab()
+        self.tab_widget.addTab(self.embedding_tab, "Embed Subtitles / הטמעת כתוביות")
 
         layout.addWidget(self.tab_widget)
