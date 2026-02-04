@@ -2,7 +2,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QProgressBar, QTextEdit,
     QFileDialog, QRadioButton, QButtonGroup, QMessageBox,
-    QListWidget, QListWidgetItem, QTabWidget
+    QListWidget, QListWidgetItem, QTabWidget, QDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
@@ -11,7 +11,10 @@ import os
 
 from core.transcriber import HebrewTranscriber
 from core.audio_extractor import AudioExtractor
-from core.exporter import MarkdownExporter, PDFExporter, SRTExporter
+from core.exporter import (
+    MarkdownExporter, PDFExporter, SRTExporter,
+    find_all_srts_multi, merge_srts_to_md, merge_srts_to_pdf
+)
 from utils.config import Config
 
 
@@ -210,6 +213,13 @@ class TranscriptionTab(QWidget):
         self.log.setPlaceholderText("לוג פעילות...")
         layout.addWidget(self.log)
 
+        # Merge SRTs button
+        self.merge_btn = QPushButton("📄 Merge SRT Files to MD/PDF")
+        self.merge_btn.setStyleSheet("padding: 10px; font-size: 13px; font-weight: bold;")
+        self.merge_btn.setToolTip("בחר תיקיות ומזג את כל קבצי ה-SRT לקובץ אחד")
+        self.merge_btn.clicked.connect(self.on_merge_srts)
+        layout.addWidget(self.merge_btn)
+
     def log_message(self, message: str):
         self.log.append(message)
 
@@ -311,6 +321,65 @@ class TranscriptionTab(QWidget):
             self.transcribe_btn.setEnabled(True)
             QMessageBox.critical(self, "שגיאה", error)
 
+    def on_merge_srts(self):
+        """Open multi-folder merge dialog and merge all SRTs into one document."""
+        from ui.pipeline_tab import MergeSRTDialog
+        dialog = MergeSRTDialog(self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        folders, output_folder, merge_title, do_md, do_pdf = dialog.get_result()
+
+        if not folders:
+            return
+        if not output_folder:
+            QMessageBox.warning(self, "שגיאה", "לא נבחרה תיקיית יעד")
+            return
+        if not do_md and not do_pdf:
+            QMessageBox.warning(self, "שגיאה", "בחר לפחות פורמט אחד (MD או PDF)")
+            return
+
+        srt_files = find_all_srts_multi(folders)
+
+        if not srt_files:
+            QMessageBox.warning(self, "לא נמצאו קבצים", "לא נמצאו קבצי SRT בתיקיות שנבחרו")
+            return
+
+        self.log_message(f"נמצאו {len(srt_files)} קבצי SRT מ-{len(folders)} תיקיות, ממזג...")
+
+        errors = []
+        created = []
+
+        if do_md:
+            try:
+                md_path = output_folder / f"{merge_title}_MERGED.md"
+                merge_srts_to_md(srt_files, md_path, merge_title)
+                self.log_message(f"✓ MD נשמר: {md_path.name}")
+                created.append(md_path.name)
+            except Exception as e:
+                errors.append(f"MD: {e}")
+                self.log_message(f"✗ שגיאת MD: {e}")
+
+        if do_pdf:
+            try:
+                pdf_path = output_folder / f"{merge_title}_MERGED.pdf"
+                merge_srts_to_pdf(srt_files, pdf_path, merge_title)
+                self.log_message(f"✓ PDF נשמר: {pdf_path.name}")
+                created.append(pdf_path.name)
+            except Exception as e:
+                errors.append(f"PDF: {e}")
+                self.log_message(f"✗ שגיאת PDF: {e}")
+
+        if errors:
+            QMessageBox.warning(self, "שגיאות מיזוג", "\n".join(errors))
+        else:
+            QMessageBox.information(
+                self, "מיזוג הושלם",
+                f"מוזגו {len(srt_files)} קבצי SRT בהצלחה!\n" +
+                "\n".join(f"• {f}" for f in created)
+            )
+            os.startfile(str(output_folder))
+
 
 class MainWindow(QMainWindow):
     """Main application window with tabs."""
@@ -320,7 +389,7 @@ class MainWindow(QMainWindow):
         self.config = Config()
 
         self.setup_ui()
-        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.0.4")
+        self.setWindowTitle("מתמלל עברית - Hebrew Transcriber v1.1.0")
         self.setMinimumSize(1100, 800)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
@@ -352,5 +421,10 @@ class MainWindow(QMainWindow):
         from ui.embedding_tab import EmbeddingTab
         self.embedding_tab = EmbeddingTab()
         self.tab_widget.addTab(self.embedding_tab, "Embed Subtitles / הטמעת כתוביות")
+
+        # MP4 Conversion tab
+        from ui.mp4_tab import MP4Tab
+        self.mp4_tab = MP4Tab()
+        self.tab_widget.addTab(self.mp4_tab, "MP4 WhatsApp / המרה ל-MP4")
 
         layout.addWidget(self.tab_widget)

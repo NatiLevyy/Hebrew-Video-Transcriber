@@ -1,5 +1,5 @@
 ## Goal
-Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output. Version 1.0.5 adds fully automated one-click pipeline.
+Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit-ai/whisper model with RTL output. Version 1.0.7 adds notebook caching and Google Drive integration.
 
 ## Completed
 - [x] Created project directory structure
@@ -23,6 +23,28 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - [x] **v1.0.5** Fully automated one-click pipeline (Login → START runs everything)
 - [x] **v1.0.5** Created HebrewTranscriber.spec for PyInstaller EXE packaging
 - [x] **v1.0.5** Built HebrewTranscriber.exe (213MB) in dist/ folder
+- [x] **v1.0.5** Fixed lazy loading for notebook discovery (scroll loop + Method 3 fallback)
+- [x] **v1.0.5** Per-notebook folder structure (each notebook gets its own subfolder)
+- [x] **v1.0.5** Search box for notebook list filtering
+- [x] **v1.0.6** SRT parsing functions (srt_to_text, find_all_srts) in exporter.py
+- [x] **v1.0.6** Single SRT export to MD/PDF (export_srt_to_md, export_srt_to_pdf)
+- [x] **v1.0.6** Merge all SRTs into unified MD/PDF (merge_srts_to_md, merge_srts_to_pdf)
+- [x] **v1.0.6** Pipeline Stage 3.5: auto export/merge after transcription
+- [x] **v1.0.6** Standalone "Merge All SRTs" button in Pipeline tab
+- [x] **v1.0.6** Merge SRT buttons in Transcription tab (MD/PDF/Both)
+- [x] **v1.0.6** Fixed PDF title spacing (arabic_reshaper strips Hebrew spaces, use get_display only)
+- [x] **v1.0.6** PDF uses flowing paragraphs (6 lines grouped), MD keeps one-line-per-entry
+- [x] **v1.0.6** Multi-folder merge dialog: "Scan Parent Folder" shows subfolders as checkboxes
+- [x] **v1.0.6** Replaced broken QFileDialog multi-select hack with reliable checkbox approach
+- [x] **v1.0.7** Notebook caching - JSON cache to avoid re-scanning all notebooks every time
+- [x] **v1.0.7** "Refresh" button checks for new notebooks (uses cache)
+- [x] **v1.0.7** "Full Scan" button ignores cache and rescans all notebooks
+- [x] **v1.0.7** Google Drive integration with OAuth2 authentication
+- [x] **v1.0.7** Manual "Upload to Drive" button with file selection dialog
+- [x] **v1.0.7** Drive folder structure: HebrewTranscriber/YYYY-MM/[Notebook]/[files]
+- [x] **v1.0.7** MP4 conversion tab exists for standalone SRT→MP4 embedding
+- [x] **v1.0.7** Fixed GPU encoder fallback - auto-switches to libx264 (CPU) if GPU encoder fails
+- [x] **v1.1.0** Fixed PyQt6 compatibility (downgraded to 6.7.0 for Windows DLL issues)
 
 ## Key Decisions
 - **Model**: ivrit-ai/whisper-v2-d4 (Hebrew fine-tuned)
@@ -33,6 +55,10 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - **v1.0.3 Subtitle Embedding**: Using mkvmerge from MKVToolNix
 - **v1.0.4 RTL Fix**: Automatic RTL punctuation fixing before embedding (from SubtitlePipeline)
 - **v1.0.5 Unified Pipeline**: 2-click workflow (Login + START) runs: Scan → Download → Transcribe → RTL → Embed
+- **v1.0.6 Multi-folder**: QFileDialog multi-select hack doesn't work on Windows/PyQt6. Solution: "Scan Parent Folder" shows subfolders as checkable items
+- **v1.0.6 PDF Hebrew**: arabic_reshaper strips spaces from Hebrew. Use get_display() only (no reshape) for correct title/text rendering
+- **v1.0.7 Notebook Caching**: JSON file at %APPDATA%\HebrewTranscriber\notebooks_cache.json stores notebook list
+- **v1.0.7 Google Drive**: OAuth2 with drive.file scope (only files created by app). User must provide client_secrets.json
 
 ## Known Issues
 - Warning about pkg_resources deprecation in ctranslate2 (harmless)
@@ -51,6 +77,7 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - `HebrewTranscriber/ui/notebooklm_tab.py` - NotebookLM downloader tab
 - `HebrewTranscriber/ui/embedding_tab.py` - Subtitle embedding tab
 - `HebrewTranscriber/ui/styles.qss` - Application styling
+- `HebrewTranscriber/core/google_drive.py` - Google Drive OAuth2 and file upload
 - `HebrewTranscriber.spec` - PyInstaller build configuration
 
 ## Version History
@@ -58,12 +85,18 @@ Build a PyQt6 desktop application for transcribing Hebrew videos using the ivrit
 - **v1.0.2** - Added NotebookLM batch downloader feature
 - **v1.0.3** - Added subtitle embedding feature (SubtitlePipeline integration)
 - **v1.0.4** - Added RTL fixer + Unified pipeline tab (complete workflow)
-- **v1.0.5** - Fully automated one-click pipeline + EXE packaging
+- **v1.0.5** - Fully automated one-click pipeline + EXE packaging + lazy loading fix + per-notebook folders + search box
+- **v1.0.6** - SRT export & merge: convert SRTs to MD/PDF, merge all SRTs into one unified document
+- **v1.0.7** - Notebook caching + Google Drive integration (OAuth2 upload with file selection)
+- **v1.1.0** - PyQt6 compatibility fix, MP4 tab fully functional, GPU→CPU encoder fallback
 
 ## External Dependencies
 - **ffmpeg** - Audio extraction (required for transcription)
 - **MKVToolNix** - Subtitle embedding (required for embed feature)
   - Download: https://mkvtoolnix.download/
+- **Google Drive API** (optional) - For uploading files to Drive
+  - User must create Google Cloud project and place `client_secrets.json` at:
+    `%APPDATA%\HebrewTranscriber\google_credentials\client_secrets.json`
 
 ## Building EXE
 ```bash

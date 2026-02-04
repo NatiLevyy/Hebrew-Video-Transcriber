@@ -9,6 +9,9 @@ from typing import List, Optional, Callable
 import re
 import subprocess
 import time
+import json
+import os
+from datetime import datetime
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -18,6 +21,10 @@ DEBUGGING_PORT = 9222
 
 # UUID pattern for notebook IDs
 UUID_PATTERN = r'[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}'
+
+# Cache configuration
+CACHE_FILE_NAME = "notebooks_cache.json"
+CACHE_VERSION = 1
 
 
 @dataclass
@@ -672,3 +679,125 @@ class NotebookLMDownloader:
 
     def _sanitize_filename(self, name: str) -> str:
         return re.sub(r'[<>:"/\\|?*]', '_', name)[:200]
+
+    # ===== CACHING METHODS =====
+
+    def _get_cache_path(self) -> Path:
+        """Get path to cache file in app data directory."""
+        if os.name == 'nt':
+            app_data = Path(os.environ.get('APPDATA', str(Path.home())))
+            cache_dir = app_data / 'HebrewTranscriber'
+        else:
+            cache_dir = Path.home() / '.HebrewTranscriber'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir / CACHE_FILE_NAME
+
+    def load_cache(self) -> dict:
+        """Load cached notebooks from JSON file."""
+        cache_path = self._get_cache_path()
+        if not cache_path.exists():
+            return {"version": CACHE_VERSION, "notebooks": [], "last_updated": None}
+
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if data.get("version") != CACHE_VERSION:
+                return {"version": CACHE_VERSION, "notebooks": [], "last_updated": None}
+            return data
+        except (json.JSONDecodeError, IOError):
+            return {"version": CACHE_VERSION, "notebooks": [], "last_updated": None}
+
+    def save_cache(self, notebooks: List[NotebookInfo]):
+        """Save notebooks to cache file."""
+        cache_path = self._get_cache_path()
+        now = datetime.now().isoformat()
+
+        # Load existing cache to preserve first_seen dates
+        existing = self.load_cache()
+        existing_by_id = {nb["project_id"]: nb for nb in existing.get("notebooks", [])}
+
+        cache_data = {
+            "version": CACHE_VERSION,
+            "last_updated": now,
+            "notebooks": []
+        }
+
+        for nb in notebooks:
+            existing_entry = existing_by_id.get(nb.project_id)
+            cache_data["notebooks"].append({
+                "project_id": nb.project_id,
+                "title": nb.title,
+                "emoji": nb.emoji,
+                "first_seen": existing_entry["first_seen"] if existing_entry else now
+            })
+
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f, ensure_ascii=False, indent=2)
+
+    def get_cached_notebooks(self) -> List[NotebookInfo]:
+        """Return notebooks from cache as NotebookInfo objects."""
+        cache = self.load_cache()
+        return [
+            NotebookInfo(
+                project_id=nb["project_id"],
+                title=nb["title"],
+                emoji=nb.get("emoji", "📓"),
+                audio_artifacts=[],
+                video_artifacts=[]
+            )
+            for nb in cache.get("notebooks", [])
+        ]
+
+    def list_notebooks_with_cache(
+        self,
+        force_refresh: bool = False,
+        on_status: Callable[[str], None] = None
+    ) -> tuple:
+        """
+        List notebooks, using cache when possible.
+
+        Returns:
+            (notebooks_list, new_count) - list of all notebooks and count of newly discovered ones
+        """
+        cached = self.get_cached_notebooks()
+        cached_ids = {nb.project_id for nb in cached}
+
+        if force_refresh or not cached:
+            # Full refresh - fetch all and replace cache
+            if on_status:
+                on_status("Force refresh - fetching all notebooks...")
+            fresh = self.list_notebooks(on_status)
+            self.save_cache(fresh)
+            new_count = len(fresh) - len(cached_ids.intersection({nb.project_id for nb in fresh}))
+            return fresh, new_count
+
+        # Incremental refresh - fetch and merge
+        if on_status:
+            on_status("Checking for new notebooks...")
+        fresh = self.list_notebooks(on_status)
+        fresh_ids = {nb.project_id for nb in fresh}
+
+        # Find new notebooks
+        new_ids = fresh_ids - cached_ids
+        new_notebooks = [nb for nb in fresh if nb.project_id in new_ids]
+
+        # Also find notebooks that were deleted
+        deleted_ids = cached_ids - fresh_ids
+
+        if new_notebooks or deleted_ids:
+            if on_status:
+                if new_notebooks:
+                    on_status(f"Found {len(new_notebooks)} new notebook(s)")
+                if deleted_ids:
+                    on_status(f"Removed {len(deleted_ids)} deleted notebook(s)")
+            # Use fresh list (which already has correct current state)
+            all_notebooks = fresh
+        else:
+            if on_status:
+                on_status("No new notebooks found")
+            all_notebooks = fresh  # Use fresh to keep order consistent
+
+        # Update cache with current list
+        self.save_cache(all_notebooks)
+
+        return all_notebooks, len(new_notebooks)
